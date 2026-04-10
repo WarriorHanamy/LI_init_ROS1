@@ -542,16 +542,26 @@ bool LI_Init::data_sufficiency_assess(MatrixXd &Jacobian_rot, int &frame_num, V3
         axis[0] = min_element(maxPos, maxPos + 3) - maxPos;
         axis[1] = 3 - (axis[0] + axis[2]);
 
+        // Log numerical diagnostics (no screen clear/cursor moves)
+        printf("[Init] Data assess: frame=%d imu=%zu lidar=%zu | "
+               "Rot%% X=%.3f Y=%.3f Z=%.3f | "
+               "eigen=[%.1f %.1f %.1f] accum_len=%.0f\n",
+               frame_num,
+               IMU_state_group_ALL.size(),
+               Lidar_state_group.size(),
+               Rot_percent[0], Rot_percent[1], Rot_percent[2],
+               EigenValue[0], EigenValue[1], EigenValue[2],
+               data_accum_length);
 
-        clear(); //clear the screen
-        printf("\033[3A\r");
+        // Optional visual progress bars (no screen clear)
         printProgress(Rot_percent_scaled[axis[0]], 88);
         printProgress(Rot_percent_scaled[axis[1]], 89);
         printProgress(Rot_percent_scaled[axis[2]], 90);
-        fflush(stdout);
+
         if (Rot_percent[0] > 0.99 && Rot_percent[1] > 0.99 && Rot_percent[2] > 0.99) {
-            printf(BOLDCYAN "[Initialization] Data accumulation finished, Lidar IMU initialization begins.\n\n" RESET);
-            printf(BOLDBLUE"============================================================ \n\n" RESET);
+            printf(BOLDCYAN "[Initialization] Data accumulation finished, Lidar IMU initialization begins.\n" RESET);
+            printf(BOLDCYAN "[Initialization] Total: %d lidar frames, %zu IMU samples\n" RESET,
+                   frame_num, IMU_state_group_ALL.size());
             data_sufficient = true;
         }
     }
@@ -588,11 +598,17 @@ void LI_Init::LI_Initialization(int &orig_odom_freq, int &cut_frame_num, double 
 
     TimeConsuming time("Batch optimization");
 
+    printf(BOLDCYAN "[Init] Step 1/8: Downsample & interpolate IMU...\n" RESET);
     downsample_interpolate_IMU(move_start_time);
+    printf(BOLDCYAN "[Init] Step 1/8: Done. IMU=%zu Lidar=%zu\n" RESET,
+           IMU_state_group.size(), Lidar_state_group.size());
+
     fout_before_filter();
+
+    printf(BOLDCYAN "[Init] Step 2/8: IMU time compensate (discard first 10 frames)...\n" RESET);
     IMU_time_compensate(0.0, true);
 
-
+    printf(BOLDCYAN "[Init] Step 3/8: Zero-phase filter (1st pass) + normalize acc...\n" RESET);
     deque<CalibState> IMU_after_zero_phase;
     deque<CalibState> Lidar_after_zero_phase;
     zero_phase_filt(get_IMU_state(), IMU_after_zero_phase);
@@ -601,26 +617,35 @@ void LI_Init::LI_Initialization(int &orig_odom_freq, int &cut_frame_num, double 
     set_IMU_state(IMU_after_zero_phase);
     set_Lidar_state(Lidar_after_zero_phase);
     cut_sequence_tail();
+    printf(BOLDCYAN "[Init] Step 3/8: Done. IMU=%zu Lidar=%zu\n" RESET,
+           IMU_state_group.size(), Lidar_state_group.size());
 
+    printf(BOLDCYAN "[Init] Step 4/8: Cross-correlation temporal init...\n" RESET);
     xcorr_temporal_init(orig_odom_freq * cut_frame_num);
     IMU_time_compensate(get_lag_time_1(), false);
+    printf(BOLDCYAN "[Init] Step 4/8: Done. time_lag_1=%.6f s\n" RESET, get_lag_time_1());
 
+    printf(BOLDCYAN "[Init] Step 5/8: Central difference (ang/lin acc)...\n" RESET);
     central_diff();
 
+    printf(BOLDCYAN "[Init] Step 6/8: Zero-phase filter (2nd pass)...\n" RESET);
     deque<CalibState> IMU_after_2nd_zero_phase;
     deque<CalibState> Lidar_after_2nd_zero_phase;
     zero_phase_filt(get_IMU_state(), IMU_after_2nd_zero_phase);
     zero_phase_filt(get_Lidar_state(), Lidar_after_2nd_zero_phase);
     set_states_2nd_filter(IMU_after_2nd_zero_phase, Lidar_after_2nd_zero_phase);
+    printf(BOLDCYAN "[Init] Step 6/8: Done.\n" RESET);
 
-
+    printf(BOLDCYAN "[Init] Step 7/8: Solve rotation (R_LI) + gyro bias...\n" RESET);
     solve_Rotation_only();
-
     solve_Rot_bias_gyro(timediff_imu_wrt_lidar);
+    printf(BOLDCYAN "[Init] Step 7/8: Done. R_LI computed, total_time_lag=%.8f s\n" RESET,
+           get_total_time_lag());
 
+    printf(BOLDCYAN "[Init] Step 8/8: Solve translation + acc bias + gravity...\n" RESET);
     acc_interpolate();
-
     solve_trans_biasacc_grav();
+    printf(BOLDCYAN "[Init] Step 8/8: Done.\n" RESET);
 
     printf(BOLDBLUE"============================================================ \n\n" RESET);
     double time_L_I = timediff_imu_wrt_lidar + time_delay_IMU_wtr_Lidar;

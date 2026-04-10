@@ -38,6 +38,7 @@
 #include <unistd.h>
 #include <Python.h>
 #include <Eigen/Core>
+#include <iomanip>
 #include <nav_msgs/Odometry.h>
 #include <nav_msgs/Path.h>
 #include <algorithm>
@@ -400,6 +401,12 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in, const ros::Publisher &pub
         }
         if (imu_cnt == 99) {
             cout << endl << "Acceleration norm  : " << mean_acc.norm() << endl;
+            // Check if actual acc norm differs significantly from configured mean_acc_norm
+            if (fabs(mean_acc.norm() - mean_acc_norm) > 0.5) {
+                ROS_WARN("IMU acc norm (%.3f) differs from configured mean_acc_norm (%.3f). "
+                         "Check initialization/mean_acc_norm in config.",
+                         mean_acc.norm(), mean_acc_norm);
+            }
             if (IMU_period > 0.01) {
                 cout << "IMU data frequency : " << 1 / IMU_period << " Hz" << endl;
                 ROS_WARN("IMU data frequency too low. Higher than 150 Hz is recommended.");
@@ -426,8 +433,16 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in, const ros::Publisher &pub
     imu_buffer.push_back(msg);
 
     // push all IMU meas into Init_LI
-    if (!imu_en && !data_accum_finished)
+    if (!imu_en && !data_accum_finished) {
         Init_LI->push_ALL_IMU_CalibState(msg, mean_acc_norm);
+        // Periodic log of IMU accumulation count
+        static int imu_init_cnt = 0;
+        imu_init_cnt++;
+        if (imu_init_cnt % 500 == 0) {
+            ROS_INFO("[Init] IMU buffered: %d samples (IMU_state_group_ALL_size=%d)",
+                     imu_init_cnt, Init_LI->IMU_state_group_ALL_size());
+        }
+    }
 
     mtx_buffer.unlock();
     sig_buffer.notify_all();
@@ -1141,9 +1156,20 @@ int main(int argc, char **argv) {
 
             kdtree_size_end = ikdtree.size();
 
+            /*** Periodic status while waiting for movement ***/
+            if (!imu_en && !data_accum_start && frame_num % 5 == 0) {
+                double pos_norm = state.pos_end.norm();
+                if (pos_norm <= 0.05) {
+                    cout << "[Init] Waiting for movement... pos_norm=" << fixed << setprecision(4) << pos_norm
+                         << " imu_buf=" << imu_buffer.size() << " frame=" << frame_num << endl;
+                }
+            }
+
             /***** Device starts to move, data accmulation begins. ****/
             if (!imu_en && !data_accum_start && state.pos_end.norm() > 0.05) {
-                printf(BOLDCYAN "[Initialization] Movement detected, data accumulation starts.\n\n\n\n\n" RESET);
+                cout << BOLDCYAN << "[Init] Movement detected, data accumulation starts."
+                     << " pos_norm=" << state.pos_end.norm() << " imu_buf=" << imu_buffer.size()
+                     << " frame=" << frame_num << RESET << endl;
                 data_accum_start = true;
                 move_start_time = lidar_end_time;
             }
@@ -1170,7 +1196,9 @@ int main(int argc, char **argv) {
                 double online_calib_completeness = lidar_end_time - online_calib_starts_time;
                 online_calib_completeness =
                         online_calib_completeness < online_refine_time ? online_calib_completeness : online_refine_time;
-                cout << "\x1B[2J\x1B[H"; //clear the screen
+                cout << "[Init] Online refinement: " << fixed << setprecision(1)
+                     << online_calib_completeness << "/" << online_refine_time << "s ("
+                     << (online_calib_completeness / online_refine_time * 100) << "%)" << endl;
                 if(online_refine_time > 0.1)
                     printProgress(online_calib_completeness / online_refine_time);
                 if (!refine_print && online_calib_completeness > (online_refine_time - 1e-6)) {
@@ -1230,6 +1258,13 @@ int main(int argc, char **argv) {
                     //Output Initialization result
                     fout_result << "Initialization result:" << endl;
                     fileout_calib_result();
+                } else {
+                    // Periodic accumulation status while waiting for sufficiency
+                    if (frame_num % 10 == 0) {
+                        cout << "[Init] Accumulating: frame=" << frame_num
+                             << " imu_buf=" << imu_buffer.size()
+                             << " lidar_pts=" << feats_undistort->size() << endl;
+                    }
                 }
             }
         }
